@@ -407,6 +407,7 @@ type Opts struct {
     maxEp      int
     epsPerFile int
     format     string
+    database   bool
 }
 
 func parseOpts(args []string) Opts {
@@ -415,6 +416,9 @@ func parseOpts(args []string) Opts {
         fmt.Println("Usage: webtoon-dl <url>")
         os.Exit(1)
     }
+
+    database := flag.Bool("db", false, "Database mode")
+
     minEp := flag.Int("min-ep", 0, "Minimum episode number to download (inclusive)")
     maxEp := flag.Int("max-ep", math.MaxInt, "Maximum episode number to download (inclusive)")
     epsPerFile := flag.Int("eps-per-file", 1, "Number of episodes to put in each PDF file")
@@ -440,6 +444,7 @@ func parseOpts(args []string) Opts {
         maxEp:      *maxEp,
         epsPerFile: *epsPerFile,
         format:     *format,
+        database:   *database,
     }
 }
 
@@ -481,7 +486,10 @@ func getepisodeTitle(url string) (string) {
     return titre
 }
 
-func saveBatch(titre string, lang string, opts Opts, episodeBatch EpisodeBatch, totalEpisodes int)  {
+
+//
+func saveBatch(pool *gopool.GoPool,titre string, lang string, opts Opts, episodeBatch EpisodeBatch, totalEpisodes int)  {
+    defer pool.Done()
 
 
             var err error
@@ -517,6 +525,38 @@ func saveBatch(titre string, lang string, opts Opts, episodeBatch EpisodeBatch, 
                 os.Exit(1)
             }
             fmt.Println(fmt.Sprintf("saved to %s", outFile))
+
+}
+
+func GetWebtoon(opts Opts)(string){
+    titre,lang := getWebtoonTitle (opts)
+
+    outDirectory := fmt.Sprintf("%s/%s/", titre, lang)
+    os.MkdirAll(outDirectory,0755)
+
+    episodeBatches := getEpisodeBatches(opts.url, opts.minEp, opts.maxEp, opts.epsPerFile)
+
+    last_episode :=0
+
+    totalPages := 0
+    for _, episodeBatch := range episodeBatches {
+        totalPages += len(episodeBatch.imgLinks)
+    }
+    totalEpisodes := episodeBatches[len(episodeBatches)-1].maxEp - episodeBatches[0].minEp + 1
+    fmt.Println(fmt.Sprintf("found %d total image links across %d episodes", totalPages, totalEpisodes))
+    fmt.Println(fmt.Sprintf("saving into %d files with max of %d episodes per file", len(episodeBatches), opts.epsPerFile))
+
+ pool := gopool.NewPool(10)
+
+    for _, episodeBatch := range episodeBatches {
+    pool.Add(1)
+        go saveBatch(pool,titre, lang, opts , episodeBatch, totalEpisodes )
+    }
+    pool.Wait()
+    last_episode=episodeBatches[len(episodeBatches)-1].maxEp
+
+    return fmt.Sprintf("insert or replace into webtoon(titre,lang,url,last_chapter) values ('%s','%s', '%s', %d)",titre,lang,opts.url,last_episode)
+
 
 }
 
@@ -558,36 +598,46 @@ func main() {
         }
     }
 
-    titre,lang := getWebtoonTitle (opts)
+    if opts.database{
+        sqlStmt := "SELECT url,last_chapter FROM webtoon ";
 
-    outDirectory := fmt.Sprintf("%s/%s/", titre, lang)
-    os.MkdirAll(outDirectory,0755)
+        rows, err := db.Query(sqlStmt)
+        if err != nil {
+                log.Printf("ERROR %q: %s\n", err, sqlStmt)
+                return
+        }
 
-    episodeBatches := getEpisodeBatches(opts.url, opts.minEp, opts.maxEp, opts.epsPerFile)
+        var url string
+        var last_chapter int
+        defer rows.Close()
+        request :=""
 
-    last_episode :=0
+        for rows.Next() {
+            err = rows.Scan( &url, &last_chapter)
+            if err != nil {
+                log.Fatal(err)
+            }
+            opts.url = url
+            opts.minEp = last_chapter
+            opts.maxEp = last_chapter+1
 
-    totalPages := 0
-    for _, episodeBatch := range episodeBatches {
-        totalPages += len(episodeBatch.imgLinks)
+
+            request= request+GetWebtoon(opts)+"\n"
+        }
+        println(request)
+        _, err = db.Exec(request)
+        if err != nil {
+            log.Fatal(err)
+        }
+
+
+    }else{
+
+        request:=GetWebtoon(opts)
+        println(request)
+        _, err = db.Exec(request)
+        if err != nil {
+            log.Fatal(err)
+        }
     }
-    totalEpisodes := episodeBatches[len(episodeBatches)-1].maxEp - episodeBatches[0].minEp + 1
-    fmt.Println(fmt.Sprintf("found %d total image links across %d episodes", totalPages, totalEpisodes))
-    fmt.Println(fmt.Sprintf("saving into %d files with max of %d episodes per file", len(episodeBatches), opts.epsPerFile))
-
- 
-
-    for _, episodeBatch := range episodeBatches {
-        go saveBatch(titre, lang, opts , episodeBatch, totalEpisodes )
-    }
-    last_episode=episodeBatches[len(episodeBatches)-1].maxEp
-    
-    request := fmt.Sprintf("insert or replace into webtoon(titre,lang,url,last_chapter) values ('%s','%s', '%s', %d)",titre,lang,opts.url,last_episode)
-    
-    println(request)
-    _, err = db.Exec(request)
-    if err != nil {
-        log.Fatal(err)
-    }
-
 }
