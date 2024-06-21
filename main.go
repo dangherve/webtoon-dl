@@ -619,7 +619,7 @@ func main() {
             }
             opts.url = url
             opts.minEp = last_chapter
-            opts.maxEp = last_chapter+1
+            //opts.maxEp = last_chapter+1
 
 
             request= request+GetWebtoon(opts)+"\n"
