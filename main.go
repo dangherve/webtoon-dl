@@ -1,7 +1,6 @@
 package main
 
 import (
-
     "archive/zip"
     "bytes"
     "encoding/json"
@@ -22,14 +21,20 @@ import (
     "database/sql"
     _ "github.com/mattn/go-sqlite3"
     "log"
-//    "sync"
     "github.com/aherve/gopool"
-//    "unicode/utf8"
+    "net/url"
+    "errors"
 )
+//    "unicode/utf8"
+//    "sync"
 
-var EpisodeGoroutine int = 1
-var WebtoonGoroutine int = 1
-
+var EpisodeGoroutine    *int
+var WebtoonGoroutine    *int
+var MaxWebtoonGoroutine *bool
+var database            *bool
+var FileVerify          *bool
+var confOverride        *bool
+var NoLog               *bool
 
 type MotiontoonJson struct {
     Assets struct {
@@ -45,7 +50,7 @@ type EpisodeBatch struct {
 }
 
 type EpisodeInfo struct {
-    titre string
+    title string
     url string
 }
 
@@ -220,11 +225,14 @@ func getEpisodeLinksForPage(url string) ([]EpisodeInfo, error) {
     doc := soup.HTMLParse(resp)
     episodeURLs := doc.Find("div", "class", "detail_lst").FindAll("a")
     var episode []EpisodeInfo
+//    var title string
     for _, episodeURL := range episodeURLs {
         if href := episodeURL.Attrs()["href"]; strings.Contains(href, "/viewer") {
             span:=episodeURL.Find("span","class","subj").Find("span")
+
+//            title=span.Text()
             episode = append(episode, EpisodeInfo{
-                titre:span.Text(),
+                title:span.Text(),
                 url:href,
             })
         }
@@ -232,20 +240,19 @@ func getEpisodeLinksForPage(url string) ([]EpisodeInfo, error) {
     return episode, nil
 }
 
-func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch int) []EpisodeBatch {
+func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch int) ([]EpisodeBatch,error) {
     if strings.Contains(url, "/viewer") {
         // assume viewing single episode
         return []EpisodeBatch{{
             imgLinks: getImgLinksForEpisode(url),
             minEp:    episodeNo(url),
             maxEp:    episodeNo(url),
-        }}
+        }},nil
     } else {
         // assume viewing set of episodes
-        println("scanning all pages to get all episode links")
+        log.Printf("scanning all pages to get all episode links")
         allEpisodeLinks := getAllEpisodeLinks(url)
-        println(fmt.Sprintf("found %d total episodes", len(allEpisodeLinks)))
-        println("4")
+        log.Printf("found %d total episodes", len(allEpisodeLinks))
 
         var desiredEpisodeLinks []string
         var desiredEpisodeTitles []string
@@ -254,21 +261,24 @@ func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch int) []EpisodeBatch
             epNo := episodeNo(episodeLink.url)
 
             if epNo >= minEp && epNo <= maxEp {
-
                 desiredEpisodeLinks = append(desiredEpisodeLinks, episodeLink.url)
-                desiredEpisodeTitles = append(desiredEpisodeTitles,episodeLink.titre)
+                desiredEpisodeTitles = append(desiredEpisodeTitles,episodeLink.title)
             }
         }
 
+        if len(desiredEpisodeLinks) == 0{
+            return nil,errors.New("No episode found")
+        }
         actualMinEp := episodeNo(desiredEpisodeLinks[0])
         if minEp > actualMinEp {
             actualMinEp = minEp
         }
+
         actualMaxEp := episodeNo(desiredEpisodeLinks[len(desiredEpisodeLinks)-1])
         if maxEp < actualMaxEp {
             actualMaxEp = maxEp
         }
-        println(fmt.Sprintf("fetching image links for episodes %d through %d", actualMinEp, actualMaxEp))
+        log.Printf("fetching image links for episodes %d through %d", actualMinEp, actualMaxEp)
 
         var episodeBatches []EpisodeBatch
         for start := 0; start < len(desiredEpisodeLinks); start += epsPerBatch {
@@ -283,8 +293,8 @@ func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch int) []EpisodeBatch
                 maxEp:    episodeNo(desiredEpisodeLinks[end-1]),
             })
         }
-        println("1")
-        return episodeBatches
+
+        return episodeBatches, nil
     }
 }
 
@@ -318,9 +328,11 @@ func getAllEpisodeLinks(url string) []EpisodeInfo {
             }
             episodeSet[episode] = struct{}{}
         }
+
         if !foundLastPage {
-            println(url)
+            log.Printf(url)
         }
+
     }
 
     allEpisode := make([]EpisodeInfo, 0, len(episodeSet))
@@ -335,15 +347,18 @@ func getAllEpisodeLinks(url string) []EpisodeInfo {
 }
 
 func episodeNo(episodeLink string) int {
+//    log.Printf("%s",episodeLink)
     re := regexp.MustCompile("episode_no=([0-9]+)")
     matches := re.FindStringSubmatch(episodeLink)
     if len(matches) != 2 {
+        log.Printf("episodeNo not found %d",len(matches))
         return 0
     }
 
     episodeNo, err := strconv.Atoi(matches[1])
 
     if err != nil {
+        log.Printf("episodeNo %d",matches[1])
         return 0
     }
     return episodeNo
@@ -352,7 +367,7 @@ func episodeNo(episodeLink string) int {
 func getImgLinksForEpisodes(episodeLinks []string, actualMaxEp int) []string {
     var allImgLinks []string
     for _, episodeLink := range episodeLinks {
-        println(fmt.Sprintf("fetching image links for episode %d/%d", episodeNo(episodeLink), actualMaxEp))
+        log.Printf("fetching image links for episode %d/%d", episodeNo(episodeLink), actualMaxEp)
         allImgLinks = append(allImgLinks, getImgLinksForEpisode(episodeLink)...)
     }
     return allImgLinks
@@ -408,7 +423,7 @@ type Opts struct {
     maxEp      int
     epsPerFile int
     format     string
-    database   bool
+
 }
 
 func parseOpts(args []string) Opts {
@@ -418,13 +433,23 @@ func parseOpts(args []string) Opts {
         os.Exit(1)
     }
 
-    database := flag.Bool("db", false, "Database mode")
+    database = flag.Bool("db", false, "Database mode get url from sqlfile for multiple webtoon")
+    confOverride = flag.Bool("confOverride", false, "Override database config by parameter store in database")
+    FileVerify = flag.Bool("file", false, "Check file if exist instead of recreate it dirrectly")
+
+    NoLog = flag.Bool("NoLog", false, "print output")
+
+    EpisodeGoroutine = flag.Int("E", 10, "Number of episode per webtoon download in the same time")
+    WebtoonGoroutine = flag.Int("W", 3, "Numer of webtoon download in the same time")
+    MaxWebtoonGoroutine= flag.Bool("MW", false, "Treat all webtoon at once")
 
     minEp := flag.Int("min-ep", 0, "Minimum episode number to download (inclusive)")
     maxEp := flag.Int("max-ep", math.MaxInt, "Maximum episode number to download (inclusive)")
+
     epsPerFile := flag.Int("eps-per-file", 1, "Number of episodes to put in each PDF file")
     format := flag.String("format", "pdf", "Output format (pdf or cbz)")
     flag.Parse()
+
     if *minEp > *maxEp {
         fmt.Println("min-ep must be less than or equal to max-ep")
         os.Exit(1)
@@ -445,7 +470,6 @@ func parseOpts(args []string) Opts {
         maxEp:      *maxEp,
         epsPerFile: *epsPerFile,
         format:     *format,
-        database:   *database,
     }
 }
 
@@ -467,41 +491,41 @@ func getOutFile(opts Opts, episodeBatch EpisodeBatch) string {
 
 }
 
-func getWebtoonTitle(opts Opts) (string,string) {
+func getWebtoonTitle(opts Opts) (string,string,error) {
+
+    _, err :=url.ParseRequestURI(opts.url)
+    if err != nil {
+            return "","",err
+
+    }
+
     outURL := strings.ReplaceAll(opts.url, "http://", "")
     outURL = strings.ReplaceAll(outURL, "https://", "")
     outURL = strings.ReplaceAll(outURL, "www.", "")
     outURL = strings.ReplaceAll(outURL, "webtoons.com/", "")
     lang := strings.Split(outURL, "/")[0]
-    titre := strings.Split(outURL, "/")[2]
-    return titre, lang
+    title := strings.Split(outURL, "/")[2]
+    return title, lang, nil
 }
 
 
-func getepisodeTitle(url string) (string) {
-println("TITRE")
-println(url)
-    outURL := strings.ReplaceAll(url, "http://", "")
-    outURL = strings.ReplaceAll(outURL, "https://", "")
-    outURL = strings.ReplaceAll(outURL, "www.", "")
-    outURL = strings.ReplaceAll(outURL, "webtoons.com/", "")
-    titre := ""//strings.Split(outURL, "/")
-    
-
-    return titre
-}
 
 
-//
-func saveBatch(pool *gopool.GoPool,titre string, lang string, opts Opts, episodeBatch EpisodeBatch, totalEpisodes int)  {
+func saveBatch(pool *gopool.GoPool,title string, lang string, opts Opts, episodeBatch EpisodeBatch, totalEpisodes int)  {
     defer pool.Done()
+    defer func() {
+        if err := recover(); err != nil {
+            log.Printf("Recovered: %v", err)
+        }
+    }()
+    var err error
 
+    outFile := fmt.Sprintf("webtoon/%s/%s/%s.%s", title, lang, episodeBatch.title, opts.format)
 
-            var err error
+    _, fileExist := os.Stat(outFile);
+    if (!*FileVerify ||  fileExist != nil){
 
-            outFile := fmt.Sprintf("webtoon/%s/%s/%s.%s", titre, lang, episodeBatch.title, opts.format)
-
-            comicFile := getComicFile(opts.format)
+        comicFile := getComicFile(opts.format)
             for idx, imgLink := range episodeBatch.imgLinks {
                 if strings.Contains(imgLink, ".gif") {
                     fmt.Println(fmt.Sprintf("WARNING: skipping gif %s", imgLink))
@@ -509,37 +533,45 @@ func saveBatch(pool *gopool.GoPool,titre string, lang string, opts Opts, episode
                 }
                 err := comicFile.addImage(fetchImage(imgLink))
                 if err != nil {
-                    fmt.Println(err.Error())
-                    os.Exit(1)
+                    println("********************")
+                    panic(err.Error())
                 }
-                fmt.Println(
-                    fmt.Sprintf(
-                        "saving episodes %d through %d of %d: added page %d/%d",
+
+                log.Printf(
+                        "Title: %s saving episodes %d through %d of %d: added page %d/%d",
+                        title,
                         episodeBatch.minEp,
                         episodeBatch.maxEp,
                         totalEpisodes,
                         idx+1,
                         len(episodeBatch.imgLinks),
-                    ),
-                )
+                    )
 
             }
             err = comicFile.save(outFile)
             if err != nil {
-                fmt.Println(err.Error())
-                os.Exit(1)
+                println("********************")
+                panic(err.Error())
             }
-            fmt.Println(fmt.Sprintf("saved to %s", outFile))
-
+            log.Printf("saved to %s", outFile)
+    }
 }
 
-func GetWebtoon(opts Opts)(string){
-    titre,lang := getWebtoonTitle (opts)
+func GetWebtoon(db *sql.DB, opts Opts)(error){
+    titre,lang,err := getWebtoonTitle (opts)
+
+    if err != nil {
+        panic(err)
+    }
 
     outDirectory := fmt.Sprintf("webtoon/%s/%s/", titre, lang)
     os.MkdirAll(outDirectory,0755)
 
-    episodeBatches := getEpisodeBatches(opts.url, opts.minEp, opts.maxEp, opts.epsPerFile)
+    episodeBatches,err := getEpisodeBatches(opts.url, opts.minEp, opts.maxEp, opts.epsPerFile)
+
+    if err != nil {
+        panic(err)
+    }
 
     last_episode :=0
 
@@ -548,45 +580,115 @@ func GetWebtoon(opts Opts)(string){
         totalPages += len(episodeBatch.imgLinks)
     }
     totalEpisodes := episodeBatches[len(episodeBatches)-1].maxEp - episodeBatches[0].minEp + 1
-    fmt.Println(fmt.Sprintf("found %d total image links across %d episodes", totalPages, totalEpisodes))
-    fmt.Println(fmt.Sprintf("saving into %d files with max of %d episodes per file", len(episodeBatches), opts.epsPerFile))
+    //fmt.Println(fmt.Sprintf("found %d total image links across %d episodes", totalPages, totalEpisodes))
+    //fmt.Println(fmt.Sprintf("saving into %d files with max of %d episodes per file", len(episodeBatches), opts.epsPerFile))
 
-    pool := gopool.NewPool(10)
+    pool := gopool.NewPool(*EpisodeGoroutine)
+
+//    ctx, cancel := context.WithCancel(context.Background())
+//    defer cancel() // Make sure it's called to release resources even if no errors
 
     for _, episodeBatch := range episodeBatches {
-    pool.Add(1)
+        pool.Add(1)
         go saveBatch(pool,titre, lang, opts , episodeBatch, totalEpisodes )
     }
     pool.Wait()
     last_episode=episodeBatches[len(episodeBatches)-1].maxEp
 
-    return fmt.Sprintf("insert or replace into webtoon(titre,lang,url,last_chapter) values ('%s','%s', '%s', %d)",titre,lang,opts.url,last_episode)
+    request := fmt.Sprintf(
+        "insert or replace into webtoon(titre,lang,url,last_chapter,epsPerFile,format) values ('%s','%s', '%s', %d,%d,'%s')",
+        titre,
+        lang,
+        opts.url,
+        last_episode,
+        opts.epsPerFile,
+        opts.format)
+    log.Printf(request)
 
-
-}
-
-func GetWebtoonBatch(pool *gopool.GoPool,opts Opts)(string){
-    defer pool.Done()
-
-    return GetWebtoon(opts)
-
-}
-
-func main() {
-    opts := parseOpts(os.Args)
-
-    db, err := sql.Open("sqlite3", "./database.db")
+    _, err = db.Exec(request)
     if err != nil {
-        log.Fatal(err)
+        panic(err)
     }
-    defer db.Close()
+    return nil
+}
+
+
+func GetWebtoonBatch(pool *gopool.GoPool,db *sql.DB,opts Opts)(){
+    defer pool.Done()
+    defer func() {
+        if err := recover(); err != nil {
+            log.Printf("Recovered: %v", err)
+        }
+    }()
+    GetWebtoon(db,opts)
+
+}
+
+func GetWebtoons(db *sql.DB, opts Opts)(){
+
+    sqlStmt := "SELECT url,last_chapter,epsPerFile,format FROM webtoon ";
+
+    rows, err := db.Query(sqlStmt)
+    if err != nil {
+        log.Printf("ERROR %q: %s\n", err, sqlStmt)
+
+    }else{
+        var webtoons []Opts
+        var url string
+        var format string
+        var epsPerFile int
+        var last_chapter int
+        defer rows.Close()
+
+        for rows.Next() {
+            err = rows.Scan( &url, &last_chapter,&epsPerFile,&format)
+            if err != nil {
+                println(url)
+                log.Fatal(err) //*
+            }
+            opts.url = url
+            opts.minEp=last_chapter
+            //by default download until the end
+            opts.maxEp=last_chapter+opts.maxEp
+            if !*confOverride {
+                opts.epsPerFile=epsPerFile
+                opts.format=format
+            }
+            webtoons = append(webtoons, opts)
+        }
+
+        if *MaxWebtoonGoroutine {
+            *WebtoonGoroutine = len(webtoons)
+        }
+        pool := gopool.NewPool(*WebtoonGoroutine)
+
+        for _, opts := range webtoons {
+            defer pool.Done()
+            pool.Add(1)
+            go GetWebtoonBatch(pool,db,opts)
+
+        }
+        pool.Wait()
+        //bug did not exit function when finish
+        os.Exit(0)
+    }
+}
+
+//open database create table if did not exist
+func openDatabse(file string)(*sql.DB){
+    db, err := sql.Open("sqlite3", file)
+
+    if err != nil {
+        println("DB erreur")
+        log.Fatal(err) //*
+    }
 
     sqlStmt := "SELECT name FROM sqlite_master WHERE type='table' AND name='webtoon'";
 
     rows, err := db.Query(sqlStmt)
     if err != nil {
-            log.Printf("ERROR %q: %s\n", err, sqlStmt)
-            return
+        println("ERROR %q: %s\n", err, sqlStmt)
+        log.Fatal(err) //*
     }
     NotExist:= true
 
@@ -594,73 +696,47 @@ func main() {
         var name string
         err = rows.Scan( &name)
         if err != nil {
-            log.Fatal(err)
+            println(err)
+            log.Fatal(err) //*
         }
         NotExist = false
     }
 
     if NotExist {
         log.Printf("create table")
-        sqlStmt := "create table webtoon (titre text, lang text,url,text,last_chapter integer, PRIMARY KEY(titre,lang));"
+        sqlStmt := "create table webtoon (titre text, lang text,url,text,last_chapter integer,epsPerFile integer,format text, PRIMARY KEY(titre,lang));"
 
         _, err := db.Exec(sqlStmt)
         if err != nil {
-                log.Printf("ERROR %q: %s\n", err, sqlStmt)
-                return
+            println("ERROR %q: %s\n", err, sqlStmt)
+            log.Fatal(err) //*
         }
     }
+    return (db)
+}
 
-    if opts.database{
-        sqlStmt := "SELECT url,last_chapter FROM webtoon ";
+func main() {
+    logFile, err := os.OpenFile("log", os.O_RDWR | os.O_CREATE, 0666)
+    if err != nil {
+        log.Fatalf("error opening file: %v", err)
+    }
+    defer logFile.Close()
 
-        rows, err := db.Query(sqlStmt)
-        if err != nil {
-                log.Printf("ERROR %q: %s\n", err, sqlStmt)
-                return
-        }
+    opts := parseOpts(os.Args)
 
-        var webtoons []Opts 
-        var url string
-        var last_chapter int
-        defer rows.Close()
-//        request :=""
+    if !*NoLog {
+       log.SetOutput(logFile)
+    }
 
-        for rows.Next() {
-            err = rows.Scan( &url, &last_chapter)
-            if err != nil {
-                log.Fatal(err)
-            }
-            opts.url = url
-            opts.minEp=last_chapter
-//            opts.maxEp=last_chapter+10
-            webtoons = append(webtoons, opts)
 
-        }
+    db:=openDatabse("./database.db")
+    defer db.Close()
 
-        pool := gopool.NewPool(1)
-
-        for _, opts := range webtoons {
-
-            pool.Add(1)
-            go GetWebtoonBatch(pool,opts)
-/*
-            println(request)
-            _, err = db.Exec(request)
-            if err != nil {
-                log.Fatal(err)
-            }
-            */
-        }
-        pool.Wait()
+    if *database {
+        GetWebtoons(db,opts)
 
 
     }else{
-
-        request:=GetWebtoon(opts)
-        println(request)
-        _, err = db.Exec(request)
-        if err != nil {
-            log.Fatal(err)
-        }
+        GetWebtoon(db,opts)
     }
 }
