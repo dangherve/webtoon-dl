@@ -448,6 +448,9 @@ func parseOpts(args []string) Opts {
 
     epsPerFile := flag.Int("eps-per-file", 1, "Number of episodes to put in each PDF file")
     format := flag.String("format", "pdf", "Output format (pdf or cbz)")
+
+    url := flag.String("u", "" ,"URL")
+
     flag.Parse()
 
     if *minEp > *maxEp {
@@ -463,9 +466,8 @@ func parseOpts(args []string) Opts {
         os.Exit(1)
     }
 
-    url := os.Args[len(os.Args)-1]
     return Opts{
-        url:        url,
+        url:        *url,
         minEp:      *minEp,
         maxEp:      *maxEp,
         epsPerFile: *epsPerFile,
@@ -567,6 +569,8 @@ func GetWebtoon(db *sql.DB, opts Opts)(error){
     outDirectory := fmt.Sprintf("webtoon/%s/%s/", titre, lang)
     os.MkdirAll(outDirectory,0755)
 
+
+
     episodeBatches,err := getEpisodeBatches(opts.url, opts.minEp, opts.maxEp, opts.epsPerFile)
 
     if err != nil {
@@ -580,8 +584,11 @@ func GetWebtoon(db *sql.DB, opts Opts)(error){
         totalPages += len(episodeBatch.imgLinks)
     }
     totalEpisodes := episodeBatches[len(episodeBatches)-1].maxEp - episodeBatches[0].minEp + 1
-    //fmt.Println(fmt.Sprintf("found %d total image links across %d episodes", totalPages, totalEpisodes))
-    //fmt.Println(fmt.Sprintf("saving into %d files with max of %d episodes per file", len(episodeBatches), opts.epsPerFile))
+
+    fmt.Println(fmt.Sprintf("Webtoon: %s lang: %s episode:%d totalPages:%d totalEpisodes:%d bathces:%d(ep %d)", titre, lang, opts.minEp,len(episodeBatches), opts.epsPerFile))
+
+//    fmt.Println(fmt.Sprintf("found %d total image links across %d episodes", totalPages, totalEpisodes))
+//    fmt.Println(fmt.Sprintf("saving into %d files with max of %d episodes per file", len(episodeBatches), opts.epsPerFile))
 
     pool := gopool.NewPool(*EpisodeGoroutine)
 
@@ -609,6 +616,9 @@ func GetWebtoon(db *sql.DB, opts Opts)(error){
     if err != nil {
         panic(err)
     }
+
+    fmt.Println(fmt.Sprintf("Completed Webtoon: %s lang: %s", titre, lang))
+
     return nil
 }
 
@@ -625,8 +635,13 @@ func GetWebtoonBatch(pool *gopool.GoPool,db *sql.DB,opts Opts)(){
 }
 
 func GetWebtoons(db *sql.DB, opts Opts)(){
+    var sqlStmt string
 
-    sqlStmt := "SELECT url,last_chapter,epsPerFile,format FROM webtoon ";
+    if(len(opts.url) == 0){
+        sqlStmt = "SELECT url,last_chapter,epsPerFile,format FROM webtoon ";
+    }else{
+        sqlStmt = "SELECT url,last_chapter,epsPerFile,format FROM webtoon where url='" +opts.url+"'";
+    }
 
     rows, err := db.Query(sqlStmt)
     if err != nil {
@@ -647,12 +662,12 @@ func GetWebtoons(db *sql.DB, opts Opts)(){
                 log.Fatal(err) //*
             }
             opts.url = url
-            opts.minEp=last_chapter
+
             //by default download until the end
-            opts.maxEp=last_chapter+opts.maxEp
             if !*confOverride {
                 opts.epsPerFile=epsPerFile
                 opts.format=format
+                opts.minEp=last_chapter
             }
             webtoons = append(webtoons, opts)
         }
@@ -728,6 +743,9 @@ func main() {
        log.SetOutput(logFile)
     }
 
+    if *FileVerify {
+        println("file verify on")
+    }
 
     db:=openDatabse("./database.db")
     defer db.Close()
