@@ -254,7 +254,12 @@ func getEpisodeBatches(url string, minEp, maxEp, epsPerBatch, delayMs int) []Epi
 		// assume viewing set of episodes
 		println("scanning all pages to get all episode links")
 		allEpisodeLinks := getAllEpisodeLinks(url, delayMs)
-		println(fmt.Sprintf("found %d total episodes", len(allEpisodeLinks)))
+		if len(allEpisodeLinks) > 0 {
+			println(fmt.Sprintf("found %d total episodes", len(allEpisodeLinks)))
+		} else {
+			println("no episodes found; aborting")
+			os.Exit(1)
+		}
 
 		var desiredEpisodeLinks []string
 		for _, episodeLink := range allEpisodeLinks {
