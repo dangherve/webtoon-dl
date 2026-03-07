@@ -1,0 +1,11 @@
+when:
+  - event: push
+    branch:
+        exclude: master
+
+steps:
+  - name: sync repo
+    image: dangherve/owngit
+    commands:
+        - ./buildTools/mainBranch.sh
+        - ./buildTools/rebase.sh
