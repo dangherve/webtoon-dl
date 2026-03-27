@@ -7,3 +7,5 @@
 .DS_Store
 webtoon-dl
 opt
+
+!buildTools
